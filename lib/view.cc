@@ -216,6 +216,10 @@ RosValue::ros_time_t View::getStartTime() {
   start_time.nsecs = UINT32_MAX;
 
   for (const auto& bag : bags_) {
+    if (bag->chunks_.empty()) {
+      continue;
+    }
+
     const auto& bag_start = bag->chunks_.front().info.start_time;
     if (bag_start.secs < start_time.secs) {
       start_time = bag_start;
@@ -233,6 +237,10 @@ RosValue::ros_time_t View::getEndTime() {
   end_time.nsecs = 0;
 
   for (const auto& bag : bags_) {
+    if (bag->chunks_.empty()) {
+      continue;
+    }
+
     const auto& bag_end = bag->chunks_.back().info.end_time;
     if (bag_end.secs > end_time.secs) {
       end_time = bag_end;
