@@ -290,7 +290,8 @@ const std::string& RosValue::const_iterator<const std::string&, std::unordered_m
 
 template<>
 const std::pair<const std::string&, const RosValue::Pointer> RosValue::const_iterator<const std::pair<const std::string&, const RosValue::Pointer>, std::unordered_map<std::string, size_t>::const_iterator>::operator*() const {
-  return std::make_pair(index_->first, value_.object_info_.children.at(index_->second));
+  // Not std::make_pair: it would copy the key and leave the returned reference dangling
+  return {index_->first, value_.object_info_.children.at(index_->second)};
 }
 
 }
