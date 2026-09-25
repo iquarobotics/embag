@@ -165,7 +165,7 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
 
   // TODO: check these values are nonzero and index_pos is > 64
   connections_.resize(connection_count);
-  chunk_infos_.reserve(chunk_count);
+  chunk_infos_.resize(chunk_count);
   chunks_.reserve(chunk_count);
   index_pos_ = index_pos;
 
@@ -282,6 +282,9 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
 
       if (version != 1) {
         throw std::runtime_error("Unsupported INDEX_DATA version: " + std::to_string(version));
+      }
+      if (connection_id >= connections_.size()) {
+        throw std::runtime_error("INDEX_DATA refers to unknown connection " + std::to_string(connection_id));
       }
       if (static_cast<uint64_t>(msg_count) * RosBagTypes::index_block_t::ENTRY_SIZE > index_data_record.data_len) {
         throw std::runtime_error("INDEX_DATA record is truncated, perhaps this bag is corrupt...");
