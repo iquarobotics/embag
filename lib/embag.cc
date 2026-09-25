@@ -268,9 +268,8 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
 
     // Each chunk is followed by multiple INDEX_DATA records, so parse those out here
     for (size_t j = 0; j < info.connection_count; j++) {
-      // TODO: An INDEX_DATA record contains each message's timestamp and offset within the chunk.
-      // We currently don't save this information, but we potentially could to speed up accesses
-      // that only want data after a certain time.
+      // An INDEX_DATA record contains each message's timestamp and offset within the chunk. A pointer to them is kept
+      // (not a copy) so View::getMessageByIndex can locate any message without scanning the chunk.
       const auto index_data_record = readRecord(stream);
       const auto index_data_header = readHeader(index_data_record);
 
@@ -281,11 +280,20 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
       index_data_header.getField("conn", connection_id);
       index_data_header.getField("count", msg_count);
 
+      if (version != 1) {
+        throw std::runtime_error("Unsupported INDEX_DATA version: " + std::to_string(version));
+      }
+      if (static_cast<uint64_t>(msg_count) * RosBagTypes::index_block_t::ENTRY_SIZE > index_data_record.data_len) {
+        throw std::runtime_error("INDEX_DATA record is truncated, perhaps this bag is corrupt...");
+      }
+
       RosBagTypes::index_block_t index_block{};
       // NOTE: It seems like it would be simpler to just do &chunk here right? WRONG.
       //       C++ reuses the same memory location for the chunk variable for each loop, so
       //       if you use &chunk, all `into_chunk` values will be exactly the same
       index_block.into_chunk = &chunks_[i];
+      index_block.entries = index_data_record.data;
+      index_block.message_count = msg_count;
 
       info.message_count += msg_count;
       connections_[connection_id].blocks.push_back(index_block);

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <set>
+#include <string>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
@@ -69,6 +71,7 @@ class View {
     // TODO: Move this outside of iterator?
     struct bag_wrapper_t {
       std::shared_ptr<Bag> bag;
+      size_t bag_index = 0;  // Insertion order in View::bags_, used to break ties between equal timestamps.
       size_t processed_bytes = 0;
       uint32_t uncompressed_size = 0;
       std::shared_ptr<std::vector<char>> current_buffer;
@@ -95,18 +98,20 @@ class View {
     static header_t readHeader(const RosBagTypes::record_t &record);
     void readMessage(std::shared_ptr<bag_wrapper_t> bag_wrapper);
 
-    // Function for comparing message timestamps
+    // Function for comparing message timestamps. Equal timestamps are ordered by bag insertion order so that the
+    // order is reproducible and matches getMessageByIndex().
     struct timestamp_compare_t {
       bool operator()(std::shared_ptr<bag_wrapper_t> &left, std::shared_ptr<bag_wrapper_t> &right) {
         const auto &left_ts = left->current_timestamp;
         const auto &right_ts = right->current_timestamp;
 
-        if (left_ts.secs > right_ts.secs) {
-          return true;
-        } else if (left_ts.secs == right_ts.secs && left_ts.nsecs > right_ts.nsecs) {
-          return true;
+        if (left_ts.secs != right_ts.secs) {
+          return left_ts.secs > right_ts.secs;
         }
-        return false;
+        if (left_ts.nsecs != right_ts.nsecs) {
+          return left_ts.nsecs > right_ts.nsecs;
+        }
+        return left->bag_index > right->bag_index;
       };
     };
 
@@ -123,6 +128,20 @@ class View {
   View getMessages(std::initializer_list<std::string> topics);
   RosValue::ros_time_t getStartTime();
   RosValue::ros_time_t getEndTime();
+
+  /*
+   * Random access to the messages of a topic across all bags, without keeping the bags in memory.
+   *
+   * Messages are ordered by record timestamp, then by bag insertion order, then by position in the bag. The first
+   * call for a topic builds its index from the INDEX_DATA records (one small entry per message of that topic only).
+   *
+   * These methods are not thread safe: the index and the last decompressed chunk are cached in the View, so callers
+   * sharing a View must serialize the calls. Returned messages own their data and stay valid after further calls.
+   */
+  size_t getMessageCount(const std::string& topic);
+  std::shared_ptr<RosMessage> getMessageByIndex(const std::string& topic, size_t index);
+  // Index (insertion order) of the bag that contains the message at position index of topic.
+  size_t getMessageBagIndex(const std::string& topic, size_t index);
 
   // Bag set manipulation
   View addBag(const std::string &filename);
@@ -159,7 +178,26 @@ class View {
   }
 
  private:
+  // Location of one message, used by getMessageByIndex().
+  struct message_ref_t {
+    RosValue::ros_time_t timestamp;
+    const RosBagTypes::connection_record_t* connection;
+    const RosBagTypes::chunk_t* chunk;
+    uint32_t offset;  // Position of the MESSAGE_DATA record inside the uncompressed chunk.
+    uint32_t bag_index;
+  };
+
+  const std::vector<message_ref_t>& getMessageIndex(const std::string& topic);
+  const message_ref_t& getMessageRef(const std::string& topic, size_t index);
+
   std::vector<std::shared_ptr<Bag>> bags_;
   std::unordered_map<std::shared_ptr<Bag>, std::shared_ptr<iterator::bag_wrapper_t>> bag_wrappers_;
+
+  // Per topic message index. Built on first use, cleared by addBag().
+  std::unordered_map<std::string, std::vector<message_ref_t>> message_index_cache_;
+
+  // Last decompressed chunk (only used for compressed chunks; uncompressed messages are copied straight from the bag).
+  const RosBagTypes::chunk_t* cached_chunk_ = nullptr;
+  std::shared_ptr<std::vector<char>> cached_chunk_buffer_;
 };
 }

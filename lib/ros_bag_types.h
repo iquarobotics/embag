@@ -128,7 +128,15 @@ struct RosBagTypes {
   };
 
   struct index_block_t {
+    // Size of one INDEX_DATA entry: secs (uint32) | nsecs (uint32) | offset (uint32), where offset is the position of
+    // the MESSAGE_DATA record inside the uncompressed chunk.
+    static constexpr size_t ENTRY_SIZE = 12;
+
     chunk_t *into_chunk;
+    // INDEX_DATA entries of this connection inside into_chunk. They point into the bag bytes (memory map), which stay
+    // valid while the bag is open, so the message index costs no memory per message.
+    const char *entries = nullptr;
+    uint32_t message_count = 0;
   };
 
   struct connection_record_t {

@@ -1,4 +1,10 @@
 #include "view.h"
+
+#include <algorithm>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
 #include "ros_message.h"
 #include "ros_value.h"
 #include "util.h"
@@ -151,9 +157,11 @@ View::iterator &View::iterator::operator++() {
 View View::getMessages() {
   bag_wrappers_.clear();
 
-  for (const auto& bag : bags_) {
+  for (size_t bag_index = 0; bag_index < bags_.size(); ++bag_index) {
+    const auto& bag = bags_[bag_index];
     bag_wrappers_[bag] = std::make_shared<iterator::bag_wrapper_t>();
     bag_wrappers_[bag]->bag = bag;
+    bag_wrappers_[bag]->bag_index = bag_index;
 
     for (const auto &chunk : bag->chunks_) {
       bag_wrappers_[bag]->chunks_to_parse.emplace(&chunk);
@@ -174,9 +182,11 @@ View View::getMessages(const std::string &topic) {
 View View::getMessages(const std::vector<std::string> &topics) {
   bag_wrappers_.clear();
 
-  for (const auto& bag : bags_) {
+  for (size_t bag_index = 0; bag_index < bags_.size(); ++bag_index) {
+    const auto& bag = bags_[bag_index];
     bag_wrappers_[bag] = std::make_shared<iterator::bag_wrapper_t>();
     bag_wrappers_[bag]->bag = bag;
+    bag_wrappers_[bag]->bag_index = bag_index;
 
     for (const auto &topic : topics) {
       if (!bag->topic_connection_map_.count(topic)) {
@@ -242,6 +252,128 @@ View View::addBag(const std::string &filename) {
 
 View View::addBag(std::shared_ptr<Bag> bag) {
   bags_.emplace_back(bag);
+  message_index_cache_.clear();
   return *this;
 }
+
+const std::vector<View::message_ref_t>& View::getMessageIndex(const std::string& topic) {
+  const auto it = message_index_cache_.find(topic);
+  if (it != message_index_cache_.end()) {
+    return it->second;
+  }
+
+  std::vector<message_ref_t> refs;
+  for (size_t bag_index = 0; bag_index < bags_.size(); ++bag_index) {
+    const auto& bag = bags_[bag_index];
+    const auto conn_it = bag->topic_connection_map_.find(topic);
+    if (conn_it == bag->topic_connection_map_.end()) {
+      continue;
+    }
+    for (const auto* connection : conn_it->second) {
+      for (const auto& block : connection->blocks) {
+        const char* p = block.entries;
+        for (uint32_t i = 0; i < block.message_count; ++i, p += RosBagTypes::index_block_t::ENTRY_SIZE) {
+          message_ref_t ref{};
+          std::memcpy(&ref.timestamp.secs, p, sizeof(uint32_t));
+          std::memcpy(&ref.timestamp.nsecs, p + 4, sizeof(uint32_t));
+          std::memcpy(&ref.offset, p + 8, sizeof(uint32_t));
+          ref.connection = connection;
+          ref.chunk = block.into_chunk;
+          ref.bag_index = static_cast<uint32_t>(bag_index);
+          refs.push_back(ref);
+        }
+      }
+    }
+  }
+
+  // Same order as the iterator: timestamp, then bag insertion order, then position in the bag file.
+  std::sort(refs.begin(), refs.end(), [](const message_ref_t& a, const message_ref_t& b) {
+    if (a.timestamp.secs != b.timestamp.secs) {
+      return a.timestamp.secs < b.timestamp.secs;
+    }
+    if (a.timestamp.nsecs != b.timestamp.nsecs) {
+      return a.timestamp.nsecs < b.timestamp.nsecs;
+    }
+    if (a.bag_index != b.bag_index) {
+      return a.bag_index < b.bag_index;
+    }
+    if (a.chunk->offset != b.chunk->offset) {
+      return a.chunk->offset < b.chunk->offset;
+    }
+    return a.offset < b.offset;
+  });
+
+  return message_index_cache_.emplace(topic, std::move(refs)).first->second;
 }
+
+const View::message_ref_t& View::getMessageRef(const std::string& topic, size_t index) {
+  const auto& refs = getMessageIndex(topic);
+  if (index >= refs.size()) {
+    throw std::out_of_range("Message index " + std::to_string(index) + " out of range for topic " + topic + " (" +
+                            std::to_string(refs.size()) + " messages)");
+  }
+  return refs[index];
+}
+
+size_t View::getMessageCount(const std::string& topic) { return getMessageIndex(topic).size(); }
+
+size_t View::getMessageBagIndex(const std::string& topic, size_t index) {
+  return getMessageRef(topic, index).bag_index;
+}
+
+std::shared_ptr<RosMessage> View::getMessageByIndex(const std::string& topic, size_t index) {
+  const auto& ref = getMessageRef(topic, index);
+  const auto* chunk = ref.chunk;
+
+  // Uncompressed chunks are read in place from the bag bytes; compressed ones are decompressed once and cached.
+  const char* chunk_data = nullptr;
+  uint64_t chunk_size = chunk->uncompressed_size;
+  if (chunk->compression == "none") {
+    chunk_data = chunk->record.data;
+    chunk_size = std::min<uint64_t>(chunk_size, chunk->record.data_len);
+  } else {
+    if (chunk != cached_chunk_) {
+      // Free the previous chunk before allocating the next one.
+      cached_chunk_ = nullptr;
+      cached_chunk_buffer_.reset();
+      auto buffer = std::make_shared<std::vector<char>>(chunk->uncompressed_size);
+      chunk->decompress(buffer->data());
+      cached_chunk_buffer_ = std::move(buffer);
+      cached_chunk_ = chunk;
+    }
+    chunk_data = cached_chunk_buffer_->data();
+  }
+
+  // MESSAGE_DATA record layout: header_len (4) | header | data_len (4) | data
+  const auto require = [&](uint64_t end) {
+    if (end > chunk_size) {
+      throw std::runtime_error("Message record out of chunk bounds for topic " + topic +
+                               ", perhaps this bag is corrupt...");
+    }
+  };
+  uint64_t pos = ref.offset;
+  uint32_t header_len = 0;
+  require(pos + sizeof(header_len));
+  std::memcpy(&header_len, chunk_data + pos, sizeof(header_len));
+  pos += sizeof(header_len) + header_len;
+  uint32_t data_len = 0;
+  require(pos + sizeof(data_len));
+  std::memcpy(&data_len, chunk_data + pos, sizeof(data_len));
+  pos += sizeof(data_len);
+  require(pos + data_len);
+
+  std::shared_ptr<std::vector<char>> buffer;
+  size_t data_offset = 0;
+  if (chunk->compression == "none") {
+    // Copy only this message, so the returned message does not keep a whole chunk alive.
+    buffer = std::make_shared<std::vector<char>>(chunk_data + pos, chunk_data + pos + data_len);
+  } else {
+    buffer = cached_chunk_buffer_;
+    data_offset = pos;
+  }
+
+  const auto& bag = bags_[ref.bag_index];
+  return std::make_shared<RosMessage>(ref.connection->topic, ref.timestamp, ref.connection->data.md5sum, buffer,
+                                      data_offset, data_len, bag->msgDefForTopic(ref.connection->topic));
+}
+}  // namespace Embag
