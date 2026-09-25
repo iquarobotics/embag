@@ -256,7 +256,9 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
     const auto chunk_record = readRecord(stream);
     const auto chunk_header = readHeader(chunk_record);
 
-    RosBagTypes::chunk_t chunk{chunk_record};
+    // Constructed in place so index blocks can point to it; chunks_ is reserved, so it never reallocates
+    chunks_.emplace_back(chunk_record);
+    RosBagTypes::chunk_t& chunk = chunks_.back();
     chunk.offset = stream.tellg();
 
     chunk_header.getField("compression", chunk.compression);
@@ -291,10 +293,7 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
       }
 
       RosBagTypes::index_block_t index_block{};
-      // NOTE: It seems like it would be simpler to just do &chunk here right? WRONG.
-      //       C++ reuses the same memory location for the chunk variable for each loop, so
-      //       if you use &chunk, all `into_chunk` values will be exactly the same
-      index_block.into_chunk = &chunks_[i];
+      index_block.into_chunk = &chunk;
       index_block.entries = index_data_record.data;
       index_block.message_count = msg_count;
 
@@ -304,7 +303,6 @@ bool Bag::readRecords(boost::iostreams::stream<T> &stream) {
     }
 
     chunk.info = info;
-    chunks_.push_back(chunk);
   }
 
   return true;
