@@ -43,10 +43,11 @@ struct ros_msg_skipper : qi::grammar<Iterator> {
     using qi::repeat;
     using qi::lit;
     using boost::spirit::ascii::space;
+    using boost::spirit::ascii::blank;
 
     comment = *space >> "#" >> *(char_ - eol);
     separator = repeat(80)['='] - eol;
-    blank_lines = *lit(' ') >> eol;
+    blank_lines = *blank >> eol;
     line_noise = eol >> *space;
 
     skip = line_noise | comment | separator | eol | blank_lines;
@@ -66,8 +67,10 @@ struct ros_msg_grammar : qi::grammar<Iterator, RosMsgTypes::MsgDef::parseable_in
   ros_msg_grammar() : ros_msg_grammar::base_type(msg) {
     using qi::lit;
     using qi::lexeme;
+    using qi::omit;
     using boost::spirit::ascii::char_;
     using boost::spirit::ascii::space;
+    using boost::spirit::ascii::blank;
     using boost::spirit::qi::uint_;
     using boost::spirit::eol;
     using boost::spirit::attr;
@@ -78,12 +81,12 @@ struct ros_msg_grammar : qi::grammar<Iterator, RosMsgTypes::MsgDef::parseable_in
     type %= (lit("std_msgs/") >> +(char_ - (lit('[') | space)) | +(char_ - (lit('[') | space)));
     field_name %= lexeme[+(char_ - (space | eol | '#'))];
 
-    field = type >> array_size >> +lit(' ') >> field_name;
+    field = type >> array_size >> omit[+blank] >> field_name;
 
     // Parse a constant in the form: type constant_name=constant_value
     constant_name %= lexeme[+(char_ - (space | lit('=')))];
     constant_value %= lexeme[+(char_ - (space | eol | '#'))];
-    constant = type >> +lit(' ') >> constant_name >> *lit(' ') >> lit('=') >> *lit(' ') >> constant_value;
+    constant = type >> omit[+blank] >> constant_name >> omit[*blank] >> lit('=') >> omit[*blank] >> constant_value;
 
     // Each line of a message definition can be a constant or a field declaration
     member = constant | field;
